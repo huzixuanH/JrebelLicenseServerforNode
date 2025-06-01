@@ -1,0 +1,339 @@
+// index.js
+const express = require('express');
+const bodyParser = require('body-parser');
+const { v4: uuidv4 } = require('uuid');
+
+// 引入你本地已转换的 JrebelSign 和 rsasign 类
+// 请确保 JrebelSign.js 和 rsasign.js 存在于同一目录下，并且 Base64.js, Hex.js, ByteUtil.js, LicenseServer2ToJRebelPrivateKey.js 也已正确放置
+const JrebelSign = require('./JrebelSign');
+const rsasign = require('./rsasign');
+
+const app = express();
+const SERVER_GUID = "a1b4aea8-b031-4302-b602-670a990272cb";
+
+// 使用 body-parser 中间件来解析不同类型的请求体
+// 这会使得 POST 请求的参数可以在 req.body 中获取
+app.use(bodyParser.urlencoded({ extended: true })); // 解析 application/x-www-form-urlencoded
+app.use(bodyParser.json()); // 解析 application/json
+
+class MainServer {
+    constructor() {
+        this.SERVER_GUID = SERVER_GUID;
+    }
+
+    // Java 中的 parseArguments 方法，Node.js 中通常通过 minimist 或 yargs 等库来解析命令行参数，
+    // 但为了保持方法名一致，这里手动实现。
+    // 在 Node.js 中，process.argv 包含了命令行参数。
+    static parseArguments(args) {
+        if (args.length % 2 !== 0) {
+            throw new Error("Error in argument's length ");
+        }
+
+        const params = {};
+
+        for (let i = 0; i < args.length; ) {
+            let argName = args[i++];
+
+            if (argName.charAt(0) === '-') {
+                if (argName.length < 2) {
+                    throw new Error("Error at argument " + argName);
+                }
+                argName = argName.substring(1);
+            }
+
+            params[argName] = args[i++];
+        }
+        return params;
+    }
+
+    // 对应 Java 的 main 方法
+    static main() {
+        const args = process.argv.slice(2); // 获取命令行参数，跳过 'node' 和 'index.js'
+        const arguments1 = MainServer.parseArguments(args);
+        let port = arguments1.p || "9009";
+
+        if (!/^\d+$/.test(port)) {
+            port = "9009";
+        }
+
+        // 使用 Express 替代 Jetty
+        const serverPort = parseInt(port);
+
+        app.listen(serverPort, () => {
+            console.log(`License Server started at http://localhost:${serverPort}`);
+            console.log(`JRebel 7.1 and earlier version Activation address was: http://localhost:${serverPort}/{tokenname}, with any email.`);
+            console.log(`JRebel 2018.1 and later version Activation address was: http://localhost:${serverPort}/{guid}(eg:http://localhost:${serverPort}/${MainServer.getUUID()}), with any email.`);
+        });
+
+        // 将请求处理逻辑放在 handle 方法中，并将其作为 Express 路由的回调
+        const mainServerInstance = new MainServer();
+
+        // **修复点：将 app.all('*', ...) 修改为 app.all('/*', ...) 或者 app.all('/*any', ...)**
+        // 推荐使用 /*any, 更符合 Express 5 的命名通配符语法
+        app.all('/*any', (req, res) => {
+            // Express 自动处理了 request 和 response 对象，并且已经有了一些解析好的属性
+            // 模仿 Java 的 Request 和 HttpServletRequest 的一些属性
+            const baseRequest = {
+                getRequestURI: () => req.originalUrl.split('?')[0],
+                getContentType: () => req.headers['content-type'] || '',
+                getMethod: () => req.method,
+                getProtocol: () => req.protocol.toUpperCase(), // Express req.protocol 是 'http'/'https'
+                getPathInfo: () => req.path,
+                getQueryString: () => req.originalUrl.split('?')[1] || '',
+                getRemoteAddr: () => req.ip || req.connection.remoteAddress,
+                getRemoteHost: () => req.hostname,
+                getRemotePort: () => req.socket.remotePort,
+                getRemoteUser: () => '', // Java Request.getRemoteUser() 对应，Express 默认没有此属性
+                setHandled: (handled) => { /* Express 自动处理路由，无需手动设置 */ }
+            };
+
+            console.log(`#${baseRequest.getRequestURI()}`
+                + `#${baseRequest.getContentType()}`
+                + `#${baseRequest.getMethod()}`
+                + `#${baseRequest.getProtocol()}`
+                + `#${baseRequest.getPathInfo()}`
+                + `#${baseRequest.getQueryString()}`
+                + `#${baseRequest.getRemoteAddr()}`
+                + `#${baseRequest.getRemoteHost()}`
+                + `#${baseRequest.getRemotePort()}`
+                + `#${baseRequest.getRemoteUser()}`
+            );
+
+            mainServerInstance.handle(req.path, baseRequest, req, res);
+        });
+    }
+
+    // 对应 Java 的 handle 方法
+    async handle(target, baseRequest, request, response) {
+        response.status(403); // 设置默认状态码为 403 Forbidden，对应 HttpServletResponse.SC_FORBIDDEN
+        console.log(`Handling target: ${target}`);
+
+        if (target === "/") {
+            console.log("1 target:" + target);
+            this.indexHandler(baseRequest, request, response);
+        } else if (target === "/jrebel/leases" || target === "/agent/leases") {
+            console.log("2 target:" + target);
+            this.jrebelLeasesHandler(baseRequest, request, response);
+        } else if (target === "/jrebel/leases/1" || target === "/agent/leases/1") {
+            console.log("3 target:" + target);
+            this.jrebelLeases1Handler(baseRequest, request, response);
+        } else if (target === "/jrebel/validate-connection") {
+            console.log("4 target:" + target);
+            this.jrebelValidateHandler(baseRequest, request, response);
+        } else if (target === "/rpc/ping.action") {
+            console.log("5 target:" + target);
+            this.pingHandler(baseRequest, request, response);
+        } else if (target === "/rpc/obtainTicket.action") {
+            console.log("6 target:" + target);
+            this.obtainTicketHandler(baseRequest, request, response);
+        } else if (target === "/rpc/releaseTicket.action") {
+            console.log("7 target:" + target);
+            this.releaseTicketHandler(baseRequest, request, response);
+        } else {
+            console.log("8 target:" + target);
+            // 对于未匹配的路径，也可以在这里发送一个默认的 404 响应
+            response.status(404).send('Not Found');
+        }
+    }
+
+    sendJsonResponse(response, json) {
+        response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.status(200).send(json); // 对应 HttpServletResponse.SC_OK
+    }
+
+    sendXmlResponse(response, xmlContent) {
+        const signature = rsasign.Sign1(xmlContent);
+        const body = `\n${xmlContent}`;
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+        response.status(200).send(body); // 对应 HttpServletResponse.SC_OK
+    }
+
+    jrebelValidateHandler(baseRequest, request, response) {
+        baseRequest.setHandled(true); // 标记请求已处理
+        const json = {
+            "serverVersion": "3.2.4",
+            "serverProtocolVersion": "1.1",
+            "serverGuid": this.SERVER_GUID,
+            "groupType": "managed",
+            "statusCode": "SUCCESS",
+            "company": "Administrator",
+            "canGetLease": true,
+            "licenseType": 1,
+            "evaluationLicense": false,
+            "seatPoolType": "standalone"
+        };
+        this.sendJsonResponse(response, json);
+    }
+
+    jrebelLeases1Handler(baseRequest, request, response) {
+        baseRequest.setHandled(true);
+        const json = {
+            "serverVersion": "3.2.4",
+            "serverProtocolVersion": "1.1",
+            "serverGuid": this.SERVER_GUID,
+            "groupType": "managed",
+            "statusCode": "SUCCESS",
+            "msg": null,
+            "statusMessage": null
+        };
+
+        // 统一从 req.query 或 req.body 获取参数，因为 req.body 优先级更高 (用于 POST)
+        const username = request.query.username || request.body.username;
+        if (username && username.trim() !== '') { // 对应 StringUtils.isNotBlank
+            json.company = username;
+        }
+
+        this.sendJsonResponse(response, json);
+    }
+
+    jrebelLeasesHandler(baseRequest, request, response) {
+        baseRequest.setHandled(true);
+        // 统一从 req.query 或 req.body 获取参数
+        const clientRandomness = request.query.randomness || request.body.randomness;
+        const username = request.query.username || request.body.username;
+        const guid = request.query.guid || request.body.guid;
+        const reqOffline = request.query.offline || request.body.offline;
+        let offline = Boolean(reqOffline === 'true'); // 对应 Boolean.parseBoolean
+
+        const oldGuid = request.query.oldGuid || request.body.oldGuid;
+        if (oldGuid && oldGuid.trim() !== '') { // 对应 StringUtils.isNotEmpty
+            offline = true;
+        }
+
+        let validFrom = "";
+        let validUntil = "";
+
+        const clientTime = request.query.clientTime || request.body.clientTime;
+        try {
+            const clientTimeMillis = parseInt(clientTime, 10);
+            if (!isNaN(clientTimeMillis)) {
+                validFrom = clientTime;
+                validUntil = String(clientTimeMillis + 180 * 24 * 60 * 60 * 1000);
+            }
+        } catch (ignored) {
+            // 忽略非法输入，保持默认空值
+        }
+
+        const json = {
+            "serverVersion": "3.2.4",
+            "serverProtocolVersion": "1.1",
+            "serverGuid": this.SERVER_GUID,
+            "groupType": "managed",
+            "id": 1,
+            "licenseType": 1,
+            "evaluationLicense": false,
+            "signature": "OJE9wGg2xncSb+VgnYT+9HGCFaLOk28tneMFhCbpVMKoC/Iq4LuaDKPirBjG4o394/UjCDGgTBpIrzcXNPdVxVr8PnQzpy7ZSToGO8wv/KIWZT9/ba7bDbA8/RZ4B37YkCeXhjaixpmoyz/CIZMnei4q7oWR7DYUOlOcEWDQhiY=",
+            "serverRandomness": "H2ulzLlh7E0=",
+            "seatPoolType": "standalone",
+            "statusCode": "SUCCESS",
+            "offline": offline,
+            "company": "Administrator",
+            "orderId": "",
+            "zeroIds": [],
+            "licenseValidFrom": validFrom,
+            "licenseValidUntil": validUntil
+        };
+
+        if (offline) {
+            json.validFrom = validFrom;
+            json.validUntil = validUntil;
+        }
+
+        if (clientRandomness === undefined || username === undefined || guid === undefined) {
+            response.status(403).send('Forbidden'); // 对应 HttpServletResponse.SC_FORBIDDEN
+        } else {
+            const jrebelSign = new JrebelSign();
+            jrebelSign.toLeaseCreateJson(clientRandomness, guid, offline, validFrom, validUntil);
+            json.signature = jrebelSign.getSignature();
+            json.company = username;
+            this.sendJsonResponse(response, json);
+        }
+    }
+
+    releaseTicketHandler(baseRequest, request, response) {
+        baseRequest.setHandled(true);
+        const salt = request.query.salt || request.body.salt;
+        if (salt === undefined) {
+            response.status(403).send('Forbidden');
+            return;
+        }
+        const xmlContent = `<ReleaseTicketResponse><message></message><responseCode>OK</responseCode><salt>${this.escapeXml(salt)}</salt></ReleaseTicketResponse>`;
+        this.sendXmlResponse(response, xmlContent);
+    }
+
+    obtainTicketHandler(baseRequest, request, response) {
+        baseRequest.setHandled(true);
+        const salt = request.query.salt || request.body.salt;
+        const username = request.query.userName || request.body.userName; // 注意 Java 是 userName，这里也保持一致
+        if (salt === undefined || username === undefined) {
+            response.status(403).send('Forbidden');
+            return;
+        }
+        const prolongationPeriod = "607875500";
+        const xmlContent = `<ObtainTicketResponse><message></message><prolongationPeriod>${prolongationPeriod}</prolongationPeriod><responseCode>OK</responseCode><salt>${this.escapeXml(salt)}</salt><ticketId>1</ticketId><ticketProperties>licensee=${this.escapeXml(username)}\tlicenseType=0\t</ticketProperties></ObtainTicketResponse>`;
+        this.sendXmlResponse(response, xmlContent);
+    }
+
+    pingHandler(baseRequest, request, response) {
+        baseRequest.setHandled(true);
+        const salt = request.query.salt || request.body.salt;
+        if (salt === undefined) {
+            response.status(403).send('Forbidden');
+            return;
+        }
+        const xmlContent = `<PingResponse><message></message><responseCode>OK</responseCode><salt>${this.escapeXml(salt)}</salt></PingResponse>`;
+        this.sendXmlResponse(response, xmlContent);
+    }
+
+    indexHandler(baseRequest, request, response) {
+        baseRequest.setHandled(true);
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+        response.status(200);
+
+        const licenseUrl = `${request.protocol}://${request.hostname}:${request.socket.localPort}`; // 对应 Java 的 request.getScheme() + "://" + request.getServerName() + ":" + request.getServerPort()
+
+        let html = "<h3>使用说明（Instructions for use）</h3>";
+        html += "<hr/>";
+        html += "<h1>Hello,This is a Jrebel License Server!</h1>";
+        html += `<p>JRebel 7.1 and earlier version Activation address was: <span style='color:red'>${licenseUrl}/{tokenname}</span>, with any email.`;
+        html += `<p>JRebel 2018.1 and later version Activation address was: ${licenseUrl}/{guid}(eg:<span style='color:red'>${licenseUrl}/${MainServer.getUUID()}</span>), with any email.`;
+
+        html += "<hr/>";
+
+        html += "<h1>Hello，此地址是 Jrebel License Server!</h1>";
+        html += `<p>JRebel 7.1 及旧版本激活地址: <span style='color:red'>${licenseUrl}/{tokenname}</span>, 以及任意邮箱地址。`;
+        html += `<p>JRebel 2018.1+ 版本激活地址: ${licenseUrl}/{guid}(例如：<span style='color:red'>${licenseUrl}/${MainServer.getUUID()}</span>), 以及任意邮箱地址。`;
+
+        response.send(html);
+    }
+
+    // XML 转义工具函数
+    escapeXml(s) {
+        if (s === null || s === undefined) return "";
+        let out = '';
+        for (let i = 0; i < s.length; i++) {
+            const c = s.charAt(i);
+            if (c === '&') {
+                out += "&amp;";
+            } else if (c === '<') {
+                out += "&lt;";
+            } else if (c === '>') {
+                out += "&gt;";
+            } else if (c === '"') {
+                out += "&quot;";
+            } else if (c === '\'') {
+                out += "&apos;";
+            } else {
+                out += c;
+            }
+        }
+        return out;
+    }
+
+    static getUUID() {
+        return uuidv4();
+    }
+}
+
+// 启动服务器
+MainServer.main();
