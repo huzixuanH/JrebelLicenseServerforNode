@@ -3,7 +3,6 @@ const bodyParser = require("body-parser");
 const { v4: uuidv4 } = require("uuid");
 
 const JrebelSign = require("./JrebelSign");
-const rsasign = require("./rsasign");
 
 const app = express();
 const SERVER_GUID = "a1b4aea8-b031-4302-b602-670a990272cb";
@@ -125,7 +124,6 @@ class MainServer {
   }
 
   sendXmlResponse(response, xmlContent) {
-    const signature = rsasign.Sign1(xmlContent);
     const body = `\n${xmlContent}`;
     response.setHeader("Content-Type", "text/html; charset=utf-8");
     response.status(200).send(body);
@@ -260,7 +258,7 @@ class MainServer {
   obtainTicketHandler(baseRequest, request, response) {
     baseRequest.setHandled(true);
     const salt = request.query.salt || request.body.salt;
-    const username = request.query.userName || request.body.userName; // 注意 Java 是 userName，这里也保持一致
+    const username = request.query.userName || request.body.userName;
     if (salt === undefined || username === undefined) {
       response.status(403).send("Forbidden");
       return;
